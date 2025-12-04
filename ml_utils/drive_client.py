@@ -102,6 +102,92 @@ class ServiceAccountDriveClient:
         )
         return file["id"]
 
+    def _find_file_by_name(
+        self,
+        name: str,
+        folder_id: str | None = None,
+    ) -> dict:
+        """
+        Find the first file in Drive matching the given name (optionally scoped
+        to a folder). Returns the file metadata dict with at least id, name, mimeType.
+        """
+        q_parts = [f"name = '{name}'", "trashed = false"]
+        effective_folder_id = folder_id or self._default_folder_id
+        if effective_folder_id:
+            q_parts.append(f"'{effective_folder_id}' in parents")
+
+        query = " and ".join(q_parts)
+
+        response = (
+            self._service.files()
+            .list(
+                q=query,
+                spaces="drive",
+                fields="files(id, name, mimeType)",
+                pageSize=10,
+            )
+            .execute()
+        )
+        files = response.get("files", [])
+        if not files:
+            raise FileNotFoundError(
+                f"No file named '{name}' found in Drive"
+                + (f" (folder {effective_folder_id})" if effective_folder_id else "")
+            )
+        if len(files) > 1:
+            # You can tighten this later if you want stricter behaviour
+            print(
+                f"Warning: multiple files named '{name}' found; using the first one "
+                f"(id={files[0]['id']})."
+            )
+        return files[0]
+
+    def download_by_name(
+        self,
+        name: str,
+        destination: str | Path | None = None,
+        folder_id: str | None = None,
+        show_progress: bool = False,
+    ) -> Path:
+        """
+        Convenience wrapper: find a file by name (optionally in a folder),
+        stream it to disk, and return the local Path.
+
+        Parameters:
+            name:        File name as shown in Drive.
+            destination: Local path; if None, saves to /content/<name>.
+            folder_id:   Override folder scope; defaults to client's default folder.
+            show_progress: If True, prints percentage as it downloads.
+
+        Returns:
+            Path to the downloaded local file.
+        """
+        from googleapiclient.http import MediaIoBaseDownload
+
+        file_meta = self._find_file_by_name(name, folder_id=folder_id)
+        file_id = file_meta["id"]
+
+        if destination is None:
+            destination = Path("/content") / name
+        else:
+            destination = Path(destination)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        request = self._service.files().get_media(fileId=file_id)
+        with destination.open("wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if show_progress and status is not None:
+                    print(f"Downloaded {int(status.progress() * 100)}%", end="\r")
+
+        if show_progress:
+            print()  # newline after progress
+
+        return destination
+
     # Add more helpers here as you need:
     # - list_files_in_folder(...)
     # - get_file_metadata(...)
